@@ -1,98 +1,124 @@
-#!/usr/bin/env python3
-"""Reference-based OpenSCAD -> Bambu/Creality 3MF paint transfer (prototype).
+"""Experimental OpenSCAD 3MF -> Bambu/Creality project conversion.
 
-Requires a Bambu Studio project created from the SAME geometry. This is deliberately
-not a general-purpose slicer project generator yet.
+Uses a known-good Bambu Studio project as a template and a matching OpenSCAD
+export as calibration. Single mesh, uniform per-face color only.
 """
 import argparse
-import collections
-import copy
-import json
+from collections import Counter
 from pathlib import Path
-import sys
 import zipfile
 import xml.etree.ElementTree as ET
 
 CORE = '{http://schemas.microsoft.com/3dmanufacturing/core/2015/02}'
+MAT = '{http://schemas.microsoft.com/3dmanufacturing/material/2015/02}'
+ET.register_namespace('', CORE[1:-1])
+ET.register_namespace('m', MAT[1:-1])
+ET.register_namespace('p', 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06')
+ET.register_namespace('BambuStudio', 'http://schemas.bambulab.com/package/2021')
 
 
-def extract(path, name):
+def read_model(path, member):
     with zipfile.ZipFile(path) as z:
-        return z.read(name)
+        return ET.fromstring(z.read(member))
 
 
-def mesh_data(xml):
-    root = ET.fromstring(xml)
-    vertices = root.findall('.//' + CORE + 'vertex')
-    triangles = root.findall('.//' + CORE + 'triangle')
-    return vertices, triangles
+def mesh(root):
+    objects = root.findall(f'.//{CORE}object')
+    meshes = [o.find(f'{CORE}mesh') for o in objects]
+    meshes = [m for m in meshes if m is not None]
+    if len(meshes) != 1:
+        raise ValueError(f'Expected exactly one mesh, found {len(meshes)}')
+    m = meshes[0]
+    return m, list(m.find(f'{CORE}vertices')), list(m.find(f'{CORE}triangles'))
 
 
-def convert(source, reference, output):
-    if Path(source).resolve() == Path(output).resolve() or Path(reference).resolve() == Path(output).resolve():
-        raise ValueError('Output must not overwrite either input')
-    with zipfile.ZipFile(source) as z:
-        src_model = z.read('3D/3dmodel.model')
-    with zipfile.ZipFile(reference) as z:
-        ref_mesh_name = '3D/Objects/object_1.model'
-        ref_model = z.read(ref_mesh_name)
-        config = json.loads(z.read('Metadata/project_settings.config'))
-        original_members = [(i, z.read(i.filename)) for i in z.infolist()]
-    sv, st = mesh_data(src_model)
-    rv, rt = mesh_data(ref_model)
-    if len(sv) != len(rv) or len(st) != len(rt):
-        raise ValueError('Reference project geometry counts do not match OpenSCAD export')
-    # Bambu Studio may recenter the mesh and shift Z; verify all vertices match
-    # within a single translation, allowing normal floating-point export noise.
-    shift = [float(rv[0].get(axis)) - float(sv[0].get(axis)) for axis in 'xyz']
-    for i, (a, b) in enumerate(zip(sv, rv)):
-        if any(abs(float(b.get(axis)) - float(a.get(axis)) - delta) > 0.001
-               for axis, delta in zip('xyz', shift)):
-            raise ValueError(f'Vertex {i} differs: not the same mesh')
-    for i, (a, b) in enumerate(zip(st, rt)):
-        if tuple(a.get(k) for k in ('v1', 'v2', 'v3')) != tuple(b.get(k) for k in ('v1', 'v2', 'v3')):
-            raise ValueError(f'Triangle {i} differs: not the same mesh')
-    # Learn paint codes from matching triangles in the reference, rather than
-    # assuming that a paint code means the same filament in every project.
-    color_to_paint = collections.defaultdict(collections.Counter)
-    for a, b in zip(st, rt):
-        color = (a.get('pid'), a.get('p1'), a.get('p2'), a.get('p3'))
-        if color[1] is None or color[2] is not None or color[3] is not None:
-            raise ValueError('Only uniform per-triangle colors are supported')
-        paint = b.get('paint_color')
-        if paint is None:
-            raise ValueError('Reference mesh has unpainted triangles')
-        color_to_paint[color][paint] += 1
+def colors(root, triangles):
+    groups = {int(g.get('id')): [c.get('color').upper() for c in g] for g in root.findall(f'.//{MAT}colorgroup')}
+    result = []
+    for tri in triangles:
+        pid = int(tri.get('pid', '0'))
+        p1 = tri.get('p1')
+        if pid not in groups or p1 is None or any(tri.get(k, p1) != p1 for k in ('p2', 'p3')):
+            raise ValueError('Only uniform per-triangle colorgroup colors are supported')
+        result.append(groups[pid][int(p1)])
+    return result
+
+
+def convert(source, reference_scad, reference_bs, output):
+    if Path(output).resolve() in {Path(source).resolve(), Path(reference_bs).resolve()}:
+        raise ValueError('Output must not overwrite an input')
+    source_root = read_model(source, '3D/3dmodel.model')
+    ref_root = read_model(reference_scad, '3D/3dmodel.model')
+    bs_root = read_model(reference_bs, '3D/Objects/object_1.model')
+    _, src_vertices, src_triangles = mesh(source_root)
+    _, ref_vertices, ref_triangles = mesh(ref_root)
+    bs_mesh, bs_vertices, bs_triangles = mesh(bs_root)
+    if len(ref_vertices) != len(bs_vertices) or len(ref_triangles) != len(bs_triangles):
+        raise ValueError('Calibration geometry counts differ')
+    # A stronger correspondence check than counts alone: vertex order and face indices.
+    for a, b in zip(ref_triangles, bs_triangles):
+        if any(a.get(k) != b.get(k) for k in ('v1', 'v2', 'v3')):
+            raise ValueError('Calibration triangle ordering differs')
     mapping = {}
-    for color, counts in color_to_paint.items():
-        if len(counts) != 1:
-            raise ValueError(f'Inconsistent paint mapping for {color}: {dict(counts)}')
-        mapping[color] = next(iter(counts))
-    # The prototype copies the verified project unchanged: geometry and paint
-    # were checked triangle-by-triangle above. It does NOT invent new metadata.
-    with zipfile.ZipFile(output, 'w') as z:
-        for info, data in original_members:
-            z.writestr(copy.copy(info), data)
-    return mapping, config.get('filament_colour', [])
+    for color, tri in zip(colors(ref_root, ref_triangles), bs_triangles):
+        paint = tri.get('paint_color')
+        if not paint:
+            raise ValueError('Calibration Bambu mesh lacks paint_color')
+        if color in mapping and mapping[color] != paint:
+            raise ValueError(f'Inconsistent paint encoding for {color}')
+        mapping[color] = paint
+    src_colors = colors(source_root, src_triangles)
+    unknown = set(src_colors) - set(mapping)
+    if unknown:
+        raise ValueError(f'Colors not in calibration: {sorted(unknown)}. Recalibrate using a reference project with these colors.')
+    # Bambu's template vertices were offset in Z by -2mm; retain its original
+    # build transform by applying the same reference-derived vertex translation.
+    offsets = []
+    for axis in ('x', 'y', 'z'):
+        deltas = [float(b.get(axis)) - float(a.get(axis)) for a, b in zip(ref_vertices, bs_vertices)]
+        delta = sum(deltas) / len(deltas)
+        if any(abs(d - delta) > 0.001 for d in deltas):
+            raise ValueError('Calibration geometry is not a simple translation')
+        offsets.append(delta)
+    verts_node = bs_mesh.find(f'{CORE}vertices')
+    tris_node = bs_mesh.find(f'{CORE}triangles')
+    verts_node.clear(); tris_node.clear()
+    for v in src_vertices:
+        ET.SubElement(verts_node, f'{CORE}vertex', {axis: format(float(v.get(axis)) + offsets[i], '.8g') for i, axis in enumerate(('x','y','z'))})
+    for tri, color in zip(src_triangles, src_colors):
+        ET.SubElement(tris_node, f'{CORE}triangle', {k: tri.get(k) for k in ('v1','v2','v3')} | {'paint_color': mapping[color]})
+    with zipfile.ZipFile(reference_bs) as zin, zipfile.ZipFile(output, 'w') as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == '3D/Objects/object_1.model':
+                data = ET.tostring(bs_root, encoding='utf-8', xml_declaration=True)
+            elif item.filename == 'Metadata/model_settings.config':
+                config = ET.fromstring(data)
+                for e in config.iter():
+                    if 'face_count' in e.attrib:
+                        e.set('face_count', str(len(src_triangles)))
+                data = ET.tostring(config, encoding='utf-8', xml_declaration=True)
+            elif item.filename.startswith('Metadata/') and item.filename.endswith('.png'):
+                # Template thumbnails are misleading for new geometry: leave them
+                # out only in future project-format iteration; current prototype
+                # preserves all references to ensure slicer import compatibility.
+                pass
+            zout.writestr(item, data)
+    print('Converted:', output)
+    print('Vertices:', len(src_vertices), 'Triangles:', len(src_triangles))
+    print('Colors:', dict(Counter(src_colors)))
+    print('Calibration:', mapping)
+    print('WARNING: Template printer settings, placement and thumbnails retained. Verify before slicing.')
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('openscad_3mf', type=Path)
-    p.add_argument('--reference', required=True, type=Path, help='Working Bambu Studio project of SAME geometry')
-    p.add_argument('--output', required=True, type=Path)
-    args = p.parse_args()
-    try:
-        mapping, colors = convert(args.openscad_3mf, args.reference, args.output)
-    except (ValueError, KeyError, zipfile.BadZipFile, ET.ParseError, OSError) as e:
-        p.exit(1, f'Error: {e}\n')
-    print('Validated source/reference geometry and paint mapping:')
-    for k, v in sorted(mapping.items()):
-        print(f'  source color group {k[0]}, index {k[1]} -> paint {v}')
-    print('Reference filament colors:', ', '.join(colors))
-    print(f'Wrote verified project copy: {args.output}')
-    print('NOTE: Prototype validates and packages an existing working project; it does not yet convert arbitrary geometry.')
-
+    p.add_argument('input')
+    p.add_argument('--reference-scad', required=True)
+    p.add_argument('--reference-bs', required=True)
+    p.add_argument('-o', '--output', required=True)
+    a = p.parse_args()
+    convert(a.input, a.reference_scad, a.reference_bs, a.output)
 
 if __name__ == '__main__':
     main()
