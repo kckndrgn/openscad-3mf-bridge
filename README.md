@@ -1,24 +1,27 @@
-# OpenSCAD 3MF Bridge v0.3.2 — experimental filament mapping
+# OpenSCAD 3MF Bridge v0.4 (experimental)
 
-This prototype assigns up to three detected colors to filament slots **1, 2, 3** rather than 2, 3, 4. It trims the four-entry filament arrays, adjusts the flush volume arrays, and removes inherited AMS slot metadata.
-
-**Important:** Slot-1 `paint_color=4` is inferred from the observed codes for slots 2 and 3. It has **not yet been validated in Creality Print**. Do not print until you inspect the sliced filament assignments.
+Converts an OpenSCAD multicolor 3MF to a Bambu-style painted project that can be opened in Creality Print. Supports **up to four colors** and multiple untransformed mesh objects, without Boolean union.
 
 ## Usage
 
 ```powershell
-python .\bridge.py .\Untitled.3mf -o .\test_blocks_v032.3mf
+python .\bridge.py .\4Color.3mf -o .\4Color-converted.3mf
 ```
 
-Keep `template.3mf` beside `bridge.py`. Requires Python 3.9+; no pip packages.
+Keep `template.3mf` next to `bridge.py`. Python standard library only.
 
-## Acceptance test
+## Tests
 
-1. Import the included `three_blocks_v032_experimental.3mf` in Creality Print 7.1. Confirm exactly 3 model filaments appear, and red/blue/green blocks are correct.
-2. Slice and verify all 3 blocks use their respective filament assignments. Do not use Auto Mapping until checking the initial model filament list.
-3. Import `wreath_v032_experimental.3mf`, verify white/green/red, slice and inspect letters and color transitions.
-4. Click Auto Mapping and note whether the three model filaments map to expected CFS slots. This mapping is determined by installed spools and may change displayed colors.
+```powershell
+python -m unittest discover -s tests -v
+```
+
+The four-color sample fixture is from OpenSCAD. The test verifies 32 vertices, 48 faces, four paint codes, four filament colors, and removal of incompatible slicer settings. A second test checks three-color filament trimming.
 
 ## Limitations
 
-Uses a bundled Bambu project template with inherited slicer settings, thumbnails and plate placement. Supports build-referenced meshes with uniform per-triangle OpenSCAD colors, no transforms or component objects, and at most three colors. The filament-1 paint code and compatibility are unverified. This release is for import testing, not production printing.
+- Slot 4 paint code `1C` is known from the prior wreath reference, but **this four-color output has not yet been validated in Creality Print**.
+- Filament order is the order of first color appearance in the source's build items; CFS slot assignment is done in the slicer.
+- Build-item transforms, component objects, per-vertex color gradients, and more than four colors are unsupported.
+- Bundled template retains Bambu metadata, printer profile, and stale thumbnails. Verify printer, filament, model placement, and slice preview.
+- `template.3mf` is an example Bambu Studio project and may contain project-specific metadata. The converter is not yet template-free.

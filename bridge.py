@@ -1,6 +1,6 @@
 """Experimental standalone OpenSCAD colored-3MF to Bambu/Creality project.
 
-Requires the bundled template. Supports 1+ build-referenced meshes, 1-3 uniform face colors.
+Requires the bundled template. Supports 1+ build-referenced meshes, 1-4 uniform face colors.
 No reference files or third-party Python dependencies are needed.
 """
 import argparse
@@ -19,7 +19,7 @@ ET.register_namespace('BambuStudio', 'http://schemas.bambulab.com/package/2021')
 
 # Experimental: codes 8 and 0C verified for slots 2 and 3;
 # code 4 for slot 1 is inferred and requires Creality Print validation.
-PAINT_SLOTS = [(1, '4'), (2, '8'), (3, '0C')]
+PAINT_SLOTS = [(1, '4'), (2, '8'), (3, '0C'), (4, '1C')]
 
 # Slicer-specific settings that Creality Print 7.1 replaces with warnings.
 # Omitting them allows the importing slicer to choose its own defaults.
@@ -102,8 +102,8 @@ def convert(source, output, template=None):
     face_colors = extract_colors(root, triangles)
     # First-appearance ordering is stable and avoids assigning unused palette colors.
     palette = list(dict.fromkeys(face_colors))
-    if len(palette) > 3:
-        raise ValueError(f'At most 3 distinct face colors supported; found {len(palette)}')
+    if len(palette) > 4:
+        raise ValueError(f'At most 4 distinct face colors supported; found {len(palette)}')
     assignments = {color: PAINT_SLOTS[i] for i, color in enumerate(palette)}
 
     with zipfile.ZipFile(template) as zin:
@@ -185,7 +185,7 @@ def convert(source, output, template=None):
     for color, count in Counter(face_colors).items():
         slot, paint = assignments[color]
         print(f'  {color}: {count} faces -> filament slot {slot} (paint {paint})')
-    print('EXPERIMENTAL: Slot-1 paint code is inferred; verify colors and sliced toolpaths in Creality Print.')
+    print('EXPERIMENTAL: Verify all filament colors and sliced toolpaths in Creality Print.')
     print('Template thumbnails and printer configuration are inherited; do not trust them.')
 
 
