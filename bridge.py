@@ -17,9 +17,9 @@ ET.register_namespace('m', MAT[1:-1])
 ET.register_namespace('p', 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06')
 ET.register_namespace('BambuStudio', 'http://schemas.bambulab.com/package/2021')
 
-# Verified from the wreath project. Slots 2, 3, 4 correspond to these
-# per-face paint codes. Slot 1 remains unused by this experimental converter.
-PAINT_SLOTS = [(2, '8'), (3, '0C'), (4, '1C')]
+# Experimental: codes 8 and 0C verified for slots 2 and 3;
+# code 4 for slot 1 is inferred and requires Creality Print validation.
+PAINT_SLOTS = [(1, '4'), (2, '8'), (3, '0C')]
 
 # Slicer-specific settings that Creality Print 7.1 replaces with warnings.
 # Omitting them allows the importing slicer to choose its own defaults.
@@ -128,13 +128,29 @@ def convert(source, output, template=None):
         settings = json.loads(zin.read('Metadata/project_settings.config'))
         for key in INCOMPATIBLE_SETTINGS:
             settings.pop(key, None)
-        filament_colors = list(settings['filament_colour'])
-        while len(filament_colors) < 4:
-            filament_colors.append('#FFFFFF')
-        for color, (slot, _) in assignments.items():
-            filament_colors[slot - 1] = color[:7]
-        settings['filament_colour'] = filament_colors
-        settings['filament_type'] = ['PLA'] * len(filament_colors)
+        # Trim all filament-indexed arrays, not only filament_colour.
+        # This prevents a phantom fourth material and stale slicer mappings.
+        count = len(palette)
+        for key, value in list(settings.items()):
+            if key.startswith('filament_') and isinstance(value, list) and len(value) == 4:
+                settings[key] = value[:count]
+        settings['filament_colour'] = [color[:7] for color in palette]
+        settings['filament_multi_colour'] = [color[:7] for color in palette]
+        settings['filament_type'] = ['PLA'] * count
+        settings['filament_self_index'] = [str(i + 1) for i in range(count)]
+        # Filament-related purge arrays must match the new filament count.
+        if isinstance(settings.get('flush_volumes_matrix'), list):
+            matrix = settings['flush_volumes_matrix']
+            if len(matrix) == 16:
+                settings['flush_volumes_matrix'] = [matrix[r * 4 + c]
+                    for r in range(count) for c in range(count)]
+        if isinstance(settings.get('flush_volumes_vector'), list):
+            vector = settings['flush_volumes_vector']
+            if len(vector) == 8:
+                settings['flush_volumes_vector'] = vector[:2 * count]
+        # This Bambu metadata describes the four original AMS slots.
+        # Remove it rather than advertise nonexistent slots.
+        settings.pop('extruder_ams_count', None)
         model_config = ET.fromstring(zin.read('Metadata/model_settings.config'))
         # The template also stores filament_map_mode as plate metadata.
         # Remove it rather than importing a Bambu-specific value.
@@ -169,7 +185,7 @@ def convert(source, output, template=None):
     for color, count in Counter(face_colors).items():
         slot, paint = assignments[color]
         print(f'  {color}: {count} faces -> filament slot {slot} (paint {paint})')
-    print('EXPERIMENTAL: Check printer profile, CFS filament mapping, placement and slice preview.')
+    print('EXPERIMENTAL: Slot-1 paint code is inferred; verify colors and sliced toolpaths in Creality Print.')
     print('Template thumbnails and printer configuration are inherited; do not trust them.')
 
 

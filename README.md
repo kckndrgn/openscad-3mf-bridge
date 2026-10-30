@@ -1,25 +1,24 @@
-# OpenSCAD 3MF Bridge v0.3.1 (experimental)
+# OpenSCAD 3MF Bridge v0.3.2 — experimental filament mapping
 
-Adds support for multiple mesh objects referenced by the 3MF build list.
+This prototype assigns up to three detected colors to filament slots **1, 2, 3** rather than 2, 3, 4. It trims the four-entry filament arrays, adjusts the flush volume arrays, and removes inherited AMS slot metadata.
 
-## Run
+**Important:** Slot-1 `paint_color=4` is inferred from the observed codes for slots 2 and 3. It has **not yet been validated in Creality Print**. Do not print until you inspect the sliced filament assignments.
+
+## Usage
 
 ```powershell
-python bridge.py "Untitled.3mf" -o "test_blocks.3mf"
+python .\bridge.py .\Untitled.3mf -o .\test_blocks_v032.3mf
 ```
 
-Place `template.3mf` next to `bridge.py`. Python 3.9+; no third-party packages.
+Keep `template.3mf` beside `bridge.py`. Requires Python 3.9+; no pip packages.
 
-The converter combines build-referenced meshes into one *mesh resource* by
-concatenating vertices and rebasing triangle indices. It does not perform a
-Boolean union, so disconnected parts remain disconnected geometrically.
+## Acceptance test
 
-Current limitations:
-- Maximum three distinct uniform triangle colors.
-- Build-item transforms and component objects are not supported (clear error).
-- The template carries inherited printer/profile information; verify your
-  Creality Hi printer profile and CFS mappings before slicing.
-- Template thumbnails are stale; do not rely on their preview images.
-- Color compatibility must be tested in Creality Print 7.1.
+1. Import the included `three_blocks_v032_experimental.3mf` in Creality Print 7.1. Confirm exactly 3 model filaments appear, and red/blue/green blocks are correct.
+2. Slice and verify all 3 blocks use their respective filament assignments. Do not use Auto Mapping until checking the initial model filament list.
+3. Import `wreath_v032_experimental.3mf`, verify white/green/red, slice and inspect letters and color transitions.
+4. Click Auto Mapping and note whether the three model filaments map to expected CFS slots. This mapping is determined by installed spools and may change displayed colors.
 
-The `get_mesh` helper remains for validating the single output mesh.
+## Limitations
+
+Uses a bundled Bambu project template with inherited slicer settings, thumbnails and plate placement. Supports build-referenced meshes with uniform per-triangle OpenSCAD colors, no transforms or component objects, and at most three colors. The filament-1 paint code and compatibility are unverified. This release is for import testing, not production printing.
