@@ -1,28 +1,25 @@
-# OpenSCAD 3MF Bridge v0.3 (experimental)
+# OpenSCAD 3MF Bridge v0.3.1 (experimental)
 
-Converts **single-mesh OpenSCAD 3MF** with **up to 3 solid face colors** into a painted Bambu Studio-style project that may import into Creality Print 7.1.
-
-Unlike v0.2, no reference OpenSCAD or Bambu files are needed per conversion. The distribution includes a **fixed known-good project template** derived from the wreath test. This is **not** a fully template-independent 3MF writer.
+Adds support for multiple mesh objects referenced by the 3MF build list.
 
 ## Run
 
-Requires Python 3.9+; no pip packages.
-
-```bash
-python bridge_v03.py "your-model.3mf" -o "your-model-converted.3mf"
+```powershell
+python bridge.py "Untitled.3mf" -o "test_blocks.3mf"
 ```
 
-Keep `template.3mf` next to `bridge_v03.py`. You can supply a different template using `--template` but its internal structure must match the known-good template.
+Place `template.3mf` next to `bridge.py`. Python 3.9+; no third-party packages.
 
-## Limitations
+The converter combines build-referenced meshes into one *mesh resource* by
+concatenating vertices and rebasing triangle indices. It does not perform a
+Boolean union, so disconnected parts remain disconnected geometrically.
 
-- One mesh; up to 3 distinct solid face colors. Color groups must have `pid` and `p1` face references.
-- Colors assigned to template filament slots 2, 3, 4, in first-seen order. Slot 1 is unused.
-- Fixed known-good paint codes `8`, `0C`, `1C` are experimentally validated for those slots **only**.
-- Template settings, printer profile, plate position and thumbnails are inherited; images may depict the old wreath. Inspect and adjust in slicer before printing.
-- Does not repair bad mesh geometry or handle multi-object 3MF, per-vertex gradients, or color boundaries beyond OpenSCAD's per-face assignments.
-- Output is not yet independently verified in Creality Print for arbitrary new models. **Do not print without checking sliced preview and printer profile.**
+Current limitations:
+- Maximum three distinct uniform triangle colors.
+- Build-item transforms and component objects are not supported (clear error).
+- The template carries inherited printer/profile information; verify your
+  Creality Hi printer profile and CFS mappings before slicing.
+- Template thumbnails are stale; do not rely on their preview images.
+- Color compatibility must be tested in Creality Print 7.1.
 
-## Development
-
-Use a feature branch. Keep `template.3mf` as a test fixture, and eventually replace this bundled reference project with a generated minimal project and explicit profile-independent metadata.
+The `get_mesh` helper remains for validating the single output mesh.

@@ -1,6 +1,6 @@
 """Experimental standalone OpenSCAD colored-3MF to Bambu/Creality project.
 
-Requires the bundled template. Supports one mesh, 1-3 uniform face colors.
+Requires the bundled template. Supports 1+ build-referenced meshes, 1-3 uniform face colors.
 No reference files or third-party Python dependencies are needed.
 """
 import argparse
@@ -39,6 +39,38 @@ def get_mesh(root):
     return mesh, list(mesh.find(f'{CORE}vertices')), list(mesh.find(f'{CORE}triangles'))
 
 
+def get_source_meshes(root):
+    """Flatten build-referenced OpenSCAD mesh objects without Boolean union.
+
+    Each object's vertex indices are rebased. Transformed/component objects are
+    rejected rather than silently placing them incorrectly.
+    """
+    objects = {obj.get('id'): obj for obj in root.findall(f'.//{CORE}resources/{CORE}object')}
+    build = root.find(f'{CORE}build')
+    if build is None or not list(build):
+        raise ValueError('3MF has no build items')
+    vertices, triangles = [], []
+    for item in build.findall(f'{CORE}item'):
+        if item.get('transform'):
+            raise ValueError('Build item transforms are not supported yet')
+        obj = objects.get(item.get('objectid'))
+        if obj is None:
+            raise ValueError(f"Build references missing object {item.get('objectid')}")
+        mesh = obj.find(f'{CORE}mesh')
+        if mesh is None:
+            raise ValueError('Component objects are not supported yet')
+        local_vertices = list(mesh.find(f'{CORE}vertices'))
+        local_triangles = list(mesh.find(f'{CORE}triangles'))
+        offset = len(vertices)
+        vertices.extend(local_vertices)
+        for tri in local_triangles:
+            attrs = dict(tri.attrib)
+            for key in ('v1', 'v2', 'v3'):
+                attrs[key] = str(int(attrs[key]) + offset)
+            triangles.append(ET.Element(f'{CORE}triangle', attrs))
+    return vertices, triangles
+
+
 def extract_colors(root, triangles):
     groups = {}
     for group in root.findall(f'.//{MAT}colorgroup'):
@@ -64,7 +96,7 @@ def convert(source, output, template=None):
 
     with zipfile.ZipFile(source) as zin:
         root = ET.fromstring(zin.read('3D/3dmodel.model'))
-    _, vertices, triangles = get_mesh(root)
+    vertices, triangles = get_source_meshes(root)
     if not vertices or not triangles:
         raise ValueError('Input mesh is empty')
     face_colors = extract_colors(root, triangles)
