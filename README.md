@@ -1,15 +1,28 @@
-# v0.2 experimental conversion engine
+# OpenSCAD 3MF Bridge v0.3 (experimental)
 
-Requires Python 3.10+ (standard library only).
+Converts **single-mesh OpenSCAD 3MF** with **up to 3 solid face colors** into a painted Bambu Studio-style project that may import into Creality Print 7.1.
 
-Run:
+Unlike v0.2, no reference OpenSCAD or Bambu files are needed per conversion. The distribution includes a **fixed known-good project template** derived from the wreath test. This is **not** a fully template-independent 3MF writer.
 
-```powershell
-python bridge_v02.py "input.3mf" --reference-scad "original_calibration.3mf" --reference-bs "bambu_calibration.3mf" -o "converted.3mf"
+## Run
+
+Requires Python 3.9+; no pip packages.
+
+```bash
+python bridge_v03.py "your-model.3mf" -o "your-model-converted.3mf"
 ```
 
-The calibration OpenSCAD file and Bambu Studio project must contain the **same geometry and triangle order**, and must cover every input color. For the initial wreath test, use `pine_bells_wreath_v1.1.6(2).3mf` and `pine_bells_wreath_v1.1.6.bs.3mf` as the calibration pair.
+Keep `template.3mf` next to `bridge_v03.py`. You can supply a different template using `--template` but its internal structure must match the known-good template.
 
-The script generates new painted mesh geometry from its input. It reuses printer profiles, placement, thumbnails, and other project metadata from the Bambu template. **Experimental:** the generated file has not yet been opened and sliced in Creality Print 7.1. Check positioning, filament mapping, mesh warnings, and print settings. Do not print without inspecting the slice preview.
+## Limitations
 
-Limitations: one mesh; uniform triangle colors; existing calibrated colors only; no automatic placement or CFS assignment; template thumbnail may be stale. It does not repair non-manifold meshes.
+- One mesh; up to 3 distinct solid face colors. Color groups must have `pid` and `p1` face references.
+- Colors assigned to template filament slots 2, 3, 4, in first-seen order. Slot 1 is unused.
+- Fixed known-good paint codes `8`, `0C`, `1C` are experimentally validated for those slots **only**.
+- Template settings, printer profile, plate position and thumbnails are inherited; images may depict the old wreath. Inspect and adjust in slicer before printing.
+- Does not repair bad mesh geometry or handle multi-object 3MF, per-vertex gradients, or color boundaries beyond OpenSCAD's per-face assignments.
+- Output is not yet independently verified in Creality Print for arbitrary new models. **Do not print without checking sliced preview and printer profile.**
+
+## Development
+
+Use a feature branch. Keep `template.3mf` as a test fixture, and eventually replace this bundled reference project with a generated minimal project and explicit profile-independent metadata.
