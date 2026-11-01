@@ -6,3 +6,5 @@ __pycache__/
 *.zip
 #allow 3mf test fixtures
 !tests/fixtures/*.3mf
+#allow template.3mf
+!template.3mf
