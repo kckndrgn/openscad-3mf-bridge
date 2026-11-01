@@ -6,6 +6,7 @@ No reference files or third-party Python dependencies are needed.
 import argparse
 from collections import Counter
 import json
+import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import zipfile
@@ -39,34 +40,60 @@ def get_mesh(root):
     return mesh, list(mesh.find(f'{CORE}vertices')), list(mesh.find(f'{CORE}triangles'))
 
 
-def get_source_meshes(root):
-    """Flatten build-referenced OpenSCAD mesh objects without Boolean union.
+def parse_transform(value):
+    """3MF 4x3 affine matrix, in row-vector order; translation is last row."""
+    if value is None:
+        return (1.,0.,0., 0.,1.,0., 0.,0.,1., 0.,0.,0.)
+    try:
+        values = tuple(float(v) for v in value.split())
+    except ValueError as exc:
+        raise ValueError(f'Invalid build-item transform: {value!r}') from exc
+    if len(values) != 12 or not all(math.isfinite(v) for v in values):
+        raise ValueError('Build-item transform must contain 12 finite numbers')
+    return values
 
-    Each object's vertex indices are rebased. Transformed/component objects are
-    rejected rather than silently placing them incorrectly.
-    """
+
+def transform_vertex(vertex, matrix):
+    x, y, z = (float(vertex.get(k)) for k in ('x','y','z'))
+    a,b,c,d,e,f,g,h,i,tx,ty,tz = matrix
+    return ET.Element(f'{CORE}vertex', {
+        'x': format(x*a+y*d+z*g+tx, '.12g'),
+        'y': format(x*b+y*e+z*h+ty, '.12g'),
+        'z': format(x*c+y*f+z*i+tz, '.12g'),
+    })
+
+
+def get_source_meshes(root):
+    """Flatten build-referenced meshes, applying 3MF affine transforms."""
     objects = {obj.get('id'): obj for obj in root.findall(f'.//{CORE}resources/{CORE}object')}
     build = root.find(f'{CORE}build')
-    if build is None or not list(build):
+    if build is None or not list(build.findall(f'{CORE}item')):
         raise ValueError('3MF has no build items')
     vertices, triangles = [], []
     for item in build.findall(f'{CORE}item'):
-        if item.get('transform'):
-            raise ValueError('Build item transforms are not supported yet')
+        matrix = parse_transform(item.get('transform'))
         obj = objects.get(item.get('objectid'))
         if obj is None:
             raise ValueError(f"Build references missing object {item.get('objectid')}")
         mesh = obj.find(f'{CORE}mesh')
         if mesh is None:
             raise ValueError('Component objects are not supported yet')
-        local_vertices = list(mesh.find(f'{CORE}vertices'))
-        local_triangles = list(mesh.find(f'{CORE}triangles'))
+        vertex_node, triangle_node = mesh.find(f'{CORE}vertices'), mesh.find(f'{CORE}triangles')
+        if vertex_node is None or triangle_node is None:
+            raise ValueError('Mesh is missing vertices or triangles')
+        local_vertices = list(vertex_node)
         offset = len(vertices)
-        vertices.extend(local_vertices)
-        for tri in local_triangles:
+        vertices.extend(transform_vertex(v, matrix) for v in local_vertices)
+        a,b,c,d,e,f,g,h,i,*_ = matrix
+        det = a*(e*i-f*h)-b*(d*i-f*g)+c*(d*h-e*g)
+        if abs(det) < 1e-12:
+            raise ValueError('Build-item transform collapses the mesh (singular matrix)')
+        for tri in triangle_node:
             attrs = dict(tri.attrib)
-            for key in ('v1', 'v2', 'v3'):
+            for key in ('v1','v2','v3'):
                 attrs[key] = str(int(attrs[key]) + offset)
+            if det < 0:
+                attrs['v2'], attrs['v3'] = attrs['v3'], attrs['v2']
             triangles.append(ET.Element(f'{CORE}triangle', attrs))
     return vertices, triangles
 
@@ -195,7 +222,24 @@ def main():
     parser.add_argument('-o', '--output', required=True)
     parser.add_argument('--template', help='Override bundled project template')
     args = parser.parse_args()
-    convert(args.input, args.output, args.template)
+    source = Path(args.input)
+    template = Path(args.template) if args.template else Path(__file__).with_name('template.3mf')
+    if not source.is_file():
+        parser.exit(2, f"Error: Input file not found: {source}\n")
+    if not template.is_file():
+        parser.exit(2, f"Error: Template file not found: {template}\n")
+    try:
+        convert(source, args.output, template)
+    except zipfile.BadZipFile:
+        parser.exit(2, "Error: Invalid or corrupted 3MF archive.\n")
+    except KeyError as exc:
+        parser.exit(2, f"Error: Missing required 3MF entry: {exc}\n")
+    except ET.ParseError as exc:
+        parser.exit(2, f"Error: Invalid 3MF XML: {exc}\n")
+    except ValueError as exc:
+        parser.exit(2, f"Error: {exc}\n")
+    except OSError as exc:
+        parser.exit(2, f"Error: File operation failed: {exc}\n")
 
 if __name__ == '__main__':
     main()
