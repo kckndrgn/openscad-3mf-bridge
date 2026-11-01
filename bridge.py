@@ -63,38 +63,77 @@ def transform_vertex(vertex, matrix):
     })
 
 
+def compose_transforms(inner, outer):
+    """Apply inner first, then outer, using 3MF row-vector matrices."""
+    result = []
+    for row in range(3):
+        for col in range(3):
+            result.append(sum(inner[row * 3 + k] * outer[k * 3 + col] for k in range(3)))
+    for col in range(3):
+        result.append(sum(inner[9 + k] * outer[k * 3 + col] for k in range(3)) + outer[9 + col])
+    return tuple(result)
+
+
+def transform_determinant(m):
+    a,b,c,d,e,f,g,h,i,*_ = m
+    return a*(e*i-f*h)-b*(d*i-f*g)+c*(d*h-e*g)
+
+
 def get_source_meshes(root):
-    """Flatten build-referenced meshes, applying 3MF affine transforms."""
-    objects = {obj.get('id'): obj for obj in root.findall(f'.//{CORE}resources/{CORE}object')}
+    """Flatten mesh and nested component instances, preserving face colors."""
+    objects = {obj.get('id'): obj for obj in root.findall(f'./{CORE}resources/{CORE}object')}
     build = root.find(f'{CORE}build')
-    if build is None or not list(build.findall(f'{CORE}item')):
+    if build is None or not build.findall(f'{CORE}item'):
         raise ValueError('3MF has no build items')
     vertices, triangles = [], []
-    for item in build.findall(f'{CORE}item'):
-        matrix = parse_transform(item.get('transform'))
-        obj = objects.get(item.get('objectid'))
+    identity = parse_transform(None)
+
+    def expand(object_id, matrix, ancestors):
+        if object_id in ancestors:
+            raise ValueError(f'Circular component reference: {" -> ".join(ancestors + (object_id,))}')
+        obj = objects.get(object_id)
         if obj is None:
-            raise ValueError(f"Build references missing object {item.get('objectid')}")
+            raise ValueError(f'3MF references missing object {object_id}')
         mesh = obj.find(f'{CORE}mesh')
-        if mesh is None:
-            raise ValueError('Component objects are not supported yet')
-        vertex_node, triangle_node = mesh.find(f'{CORE}vertices'), mesh.find(f'{CORE}triangles')
-        if vertex_node is None or triangle_node is None:
-            raise ValueError('Mesh is missing vertices or triangles')
-        local_vertices = list(vertex_node)
-        offset = len(vertices)
-        vertices.extend(transform_vertex(v, matrix) for v in local_vertices)
-        a,b,c,d,e,f,g,h,i,*_ = matrix
-        det = a*(e*i-f*h)-b*(d*i-f*g)+c*(d*h-e*g)
-        if abs(det) < 1e-12:
-            raise ValueError('Build-item transform collapses the mesh (singular matrix)')
-        for tri in triangle_node:
-            attrs = dict(tri.attrib)
-            for key in ('v1','v2','v3'):
-                attrs[key] = str(int(attrs[key]) + offset)
-            if det < 0:
-                attrs['v2'], attrs['v3'] = attrs['v3'], attrs['v2']
-            triangles.append(ET.Element(f'{CORE}triangle', attrs))
+        components = obj.find(f'{CORE}components')
+        if mesh is not None and components is not None:
+            raise ValueError(f'Object {object_id} contains both mesh and components')
+        if mesh is not None:
+            v_node, t_node = mesh.find(f'{CORE}vertices'), mesh.find(f'{CORE}triangles')
+            if v_node is None or t_node is None:
+                raise ValueError(f'Object {object_id} mesh is missing vertices or triangles')
+            det = transform_determinant(matrix)
+            if abs(det) < 1e-12:
+                raise ValueError('Transform collapses the mesh (singular matrix)')
+            offset = len(vertices)
+            local = list(v_node)
+            vertices.extend(transform_vertex(v, matrix) for v in local)
+            for tri in t_node:
+                attrs = dict(tri.attrib)
+                for key in ('v1', 'v2', 'v3'):
+                    index = int(attrs[key])
+                    if index < 0 or index >= len(local):
+                        raise ValueError(f'Invalid triangle vertex index in object {object_id}')
+                    attrs[key] = str(index + offset)
+                if det < 0:
+                    attrs['v2'], attrs['v3'] = attrs['v3'], attrs['v2']
+                triangles.append(ET.Element(f'{CORE}triangle', attrs))
+        elif components is not None:
+            for component in components.findall(f'{CORE}component'):
+                if component.get('path'):
+                    raise ValueError('Cross-part component references are not supported yet')
+                child = component.get('objectid')
+                if not child:
+                    raise ValueError(f'Component in object {object_id} lacks objectid')
+                child_matrix = parse_transform(component.get('transform'))
+                expand(child, compose_transforms(child_matrix, matrix), ancestors + (object_id,))
+        else:
+            raise ValueError(f'Object {object_id} has neither mesh nor components')
+
+    for item in build.findall(f'{CORE}item'):
+        if item.get('path'):
+            raise ValueError('Cross-part build references are not supported yet')
+        expand(item.get('objectid'), compose_transforms(identity, parse_transform(item.get('transform'))), ())
     return vertices, triangles
 
 
