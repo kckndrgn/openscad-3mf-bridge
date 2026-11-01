@@ -5,4 +5,4 @@ __pycache__/
 *.stl
 *.zip
 #allow 3mf test fixtures
-!tests/fixtures/.3mf
+!tests/fixtures/*.3mf
