@@ -6,6 +6,7 @@ No reference files or third-party Python dependencies are needed.
 import argparse
 from collections import Counter
 import json
+import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import zipfile
@@ -39,35 +40,100 @@ def get_mesh(root):
     return mesh, list(mesh.find(f'{CORE}vertices')), list(mesh.find(f'{CORE}triangles'))
 
 
-def get_source_meshes(root):
-    """Flatten build-referenced OpenSCAD mesh objects without Boolean union.
+def parse_transform(value):
+    """3MF 4x3 affine matrix, in row-vector order; translation is last row."""
+    if value is None:
+        return (1.,0.,0., 0.,1.,0., 0.,0.,1., 0.,0.,0.)
+    try:
+        values = tuple(float(v) for v in value.split())
+    except ValueError as exc:
+        raise ValueError(f'Invalid build-item transform: {value!r}') from exc
+    if len(values) != 12 or not all(math.isfinite(v) for v in values):
+        raise ValueError('Build-item transform must contain 12 finite numbers')
+    return values
 
-    Each object's vertex indices are rebased. Transformed/component objects are
-    rejected rather than silently placing them incorrectly.
-    """
-    objects = {obj.get('id'): obj for obj in root.findall(f'.//{CORE}resources/{CORE}object')}
+
+def transform_vertex(vertex, matrix):
+    x, y, z = (float(vertex.get(k)) for k in ('x','y','z'))
+    a,b,c,d,e,f,g,h,i,tx,ty,tz = matrix
+    return ET.Element(f'{CORE}vertex', {
+        'x': format(x*a+y*d+z*g+tx, '.12g'),
+        'y': format(x*b+y*e+z*h+ty, '.12g'),
+        'z': format(x*c+y*f+z*i+tz, '.12g'),
+    })
+
+
+def compose_transforms(inner, outer):
+    """Apply inner first, then outer, using 3MF row-vector matrices."""
+    result = []
+    for row in range(3):
+        for col in range(3):
+            result.append(sum(inner[row * 3 + k] * outer[k * 3 + col] for k in range(3)))
+    for col in range(3):
+        result.append(sum(inner[9 + k] * outer[k * 3 + col] for k in range(3)) + outer[9 + col])
+    return tuple(result)
+
+
+def transform_determinant(m):
+    a,b,c,d,e,f,g,h,i,*_ = m
+    return a*(e*i-f*h)-b*(d*i-f*g)+c*(d*h-e*g)
+
+
+def get_source_meshes(root):
+    """Flatten mesh and nested component instances, preserving face colors."""
+    objects = {obj.get('id'): obj for obj in root.findall(f'./{CORE}resources/{CORE}object')}
     build = root.find(f'{CORE}build')
-    if build is None or not list(build):
+    if build is None or not build.findall(f'{CORE}item'):
         raise ValueError('3MF has no build items')
     vertices, triangles = [], []
-    for item in build.findall(f'{CORE}item'):
-        if item.get('transform'):
-            raise ValueError('Build item transforms are not supported yet')
-        obj = objects.get(item.get('objectid'))
+    identity = parse_transform(None)
+
+    def expand(object_id, matrix, ancestors):
+        if object_id in ancestors:
+            raise ValueError(f'Circular component reference: {" -> ".join(ancestors + (object_id,))}')
+        obj = objects.get(object_id)
         if obj is None:
-            raise ValueError(f"Build references missing object {item.get('objectid')}")
+            raise ValueError(f'3MF references missing object {object_id}')
         mesh = obj.find(f'{CORE}mesh')
-        if mesh is None:
-            raise ValueError('Component objects are not supported yet')
-        local_vertices = list(mesh.find(f'{CORE}vertices'))
-        local_triangles = list(mesh.find(f'{CORE}triangles'))
-        offset = len(vertices)
-        vertices.extend(local_vertices)
-        for tri in local_triangles:
-            attrs = dict(tri.attrib)
-            for key in ('v1', 'v2', 'v3'):
-                attrs[key] = str(int(attrs[key]) + offset)
-            triangles.append(ET.Element(f'{CORE}triangle', attrs))
+        components = obj.find(f'{CORE}components')
+        if mesh is not None and components is not None:
+            raise ValueError(f'Object {object_id} contains both mesh and components')
+        if mesh is not None:
+            v_node, t_node = mesh.find(f'{CORE}vertices'), mesh.find(f'{CORE}triangles')
+            if v_node is None or t_node is None:
+                raise ValueError(f'Object {object_id} mesh is missing vertices or triangles')
+            det = transform_determinant(matrix)
+            if abs(det) < 1e-12:
+                raise ValueError('Transform collapses the mesh (singular matrix)')
+            offset = len(vertices)
+            local = list(v_node)
+            vertices.extend(transform_vertex(v, matrix) for v in local)
+            for tri in t_node:
+                attrs = dict(tri.attrib)
+                for key in ('v1', 'v2', 'v3'):
+                    index = int(attrs[key])
+                    if index < 0 or index >= len(local):
+                        raise ValueError(f'Invalid triangle vertex index in object {object_id}')
+                    attrs[key] = str(index + offset)
+                if det < 0:
+                    attrs['v2'], attrs['v3'] = attrs['v3'], attrs['v2']
+                triangles.append(ET.Element(f'{CORE}triangle', attrs))
+        elif components is not None:
+            for component in components.findall(f'{CORE}component'):
+                if component.get('path'):
+                    raise ValueError('Cross-part component references are not supported yet')
+                child = component.get('objectid')
+                if not child:
+                    raise ValueError(f'Component in object {object_id} lacks objectid')
+                child_matrix = parse_transform(component.get('transform'))
+                expand(child, compose_transforms(child_matrix, matrix), ancestors + (object_id,))
+        else:
+            raise ValueError(f'Object {object_id} has neither mesh nor components')
+
+    for item in build.findall(f'{CORE}item'):
+        if item.get('path'):
+            raise ValueError('Cross-part build references are not supported yet')
+        expand(item.get('objectid'), compose_transforms(identity, parse_transform(item.get('transform'))), ())
     return vertices, triangles
 
 
@@ -195,7 +261,24 @@ def main():
     parser.add_argument('-o', '--output', required=True)
     parser.add_argument('--template', help='Override bundled project template')
     args = parser.parse_args()
-    convert(args.input, args.output, args.template)
+    source = Path(args.input)
+    template = Path(args.template) if args.template else Path(__file__).with_name('template.3mf')
+    if not source.is_file():
+        parser.exit(2, f"Error: Input file not found: {source}\n")
+    if not template.is_file():
+        parser.exit(2, f"Error: Template file not found: {template}\n")
+    try:
+        convert(source, args.output, template)
+    except zipfile.BadZipFile:
+        parser.exit(2, "Error: Invalid or corrupted 3MF archive.\n")
+    except KeyError as exc:
+        parser.exit(2, f"Error: Missing required 3MF entry: {exc}\n")
+    except ET.ParseError as exc:
+        parser.exit(2, f"Error: Invalid 3MF XML: {exc}\n")
+    except ValueError as exc:
+        parser.exit(2, f"Error: {exc}\n")
+    except OSError as exc:
+        parser.exit(2, f"Error: File operation failed: {exc}\n")
 
 if __name__ == '__main__':
     main()
